@@ -56,9 +56,7 @@ LEADS_EXTRA_PARAMS = [
     {"type": "category", "target": ["variable", ["template-tag", "mensagem"]], "value": ""},
     {"type": "category", "target": ["variable", ["template-tag", "satellite"]], "value": ""},
 ]
-# TODO: confirmar o nome exato da coluna que traz as chaves das empresas
-# que receberam o orçamento (a coluna com valores separados por vírgula).
-COLUNA_EMPRESAS_QUE_RECEBERAM = "TROCAR_PELO_NOME_DA_COLUNA_EMPRESAS"
+COLUNA_EMPRESAS_QUE_RECEBERAM = "Empresas Recebedoras"
 SEPARADOR_EMPRESAS = ","
 
 # ============================================================
