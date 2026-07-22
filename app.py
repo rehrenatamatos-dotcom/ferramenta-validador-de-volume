@@ -47,6 +47,15 @@ LEADS_PARAM_TEMPLATE = {
     "type": "category",
     "target": ["variable", ["template-tag", "produto"]],
 }
+# Essa question exige outros parâmetros além de "produto" (aparecem na URL
+# do Metabase: data_inicio, data_final, announcements, mensagem, satellite).
+# data_inicio/data_final agora vêm da tela (período escolhido pelo usuário);
+# os outros três não usamos pra filtrar, então mandamos vazios.
+LEADS_EXTRA_PARAMS = [
+    {"type": "category", "target": ["variable", ["template-tag", "announcements"]], "value": ""},
+    {"type": "category", "target": ["variable", ["template-tag", "mensagem"]], "value": ""},
+    {"type": "category", "target": ["variable", ["template-tag", "satellite"]], "value": ""},
+]
 # TODO: confirmar o nome exato da coluna que traz as chaves das empresas
 # que receberam o orçamento (a coluna com valores separados por vírgula).
 COLUNA_EMPRESAS_QUE_RECEBERAM = "TROCAR_PELO_NOME_DA_COLUNA_EMPRESAS"
@@ -106,10 +115,23 @@ def get_client_products(session_token: str, chave_cliente: str) -> list:
     return sorted(set(df[COLUNA_PRODUTO].dropna().astype(str).str.strip()))
 
 
-def get_leads_not_received(session_token: str, produto: str, chave_cliente: str) -> pd.DataFrame:
-    param = copy.deepcopy(LEADS_PARAM_TEMPLATE)
-    param["value"] = produto
-    df = run_card(session_token, LEADS_CARD_ID, [param])
+def get_leads_not_received(
+    session_token: str, produto: str, chave_cliente: str, data_inicio: str, data_final: str
+) -> pd.DataFrame:
+    param_produto = copy.deepcopy(LEADS_PARAM_TEMPLATE)
+    param_produto["value"] = produto
+    param_data_inicio = {
+        "type": "date/single",
+        "target": ["variable", ["template-tag", "data_inicio"]],
+        "value": data_inicio,
+    }
+    param_data_final = {
+        "type": "date/single",
+        "target": ["variable", ["template-tag", "data_final"]],
+        "value": data_final,
+    }
+    params = [param_produto, param_data_inicio, param_data_final] + copy.deepcopy(LEADS_EXTRA_PARAMS)
+    df = run_card(session_token, LEADS_CARD_ID, params)
     if df.empty:
         return df
     if COLUNA_EMPRESAS_QUE_RECEBERAM not in df.columns:
@@ -165,7 +187,16 @@ if "metabase_username" not in st.secrets or "metabase_password" not in st.secret
 st.subheader("Cliente a auditar")
 chave_cliente = st.text_input("Chave única (ID) do cliente no Metabase")
 
-if st.button("Gerar relatório", type="primary", disabled=not chave_cliente):
+st.subheader("Período a analisar")
+col_data1, col_data2 = st.columns(2)
+with col_data1:
+    data_inicio = st.date_input("Data início", value=None, format="DD/MM/YYYY")
+with col_data2:
+    data_final = st.date_input("Data fim", value=None, format="DD/MM/YYYY")
+
+periodo_ok = data_inicio and data_final
+
+if st.button("Gerar relatório", type="primary", disabled=not (chave_cliente and periodo_ok)):
     try:
         with st.spinner("Fazendo login no Metabase..."):
             token = login(st.secrets["metabase_username"], st.secrets["metabase_password"])
@@ -183,7 +214,13 @@ if st.button("Gerar relatório", type="primary", disabled=not chave_cliente):
             resultados = []
             for i, produto in enumerate(produtos):
                 status_area.text(f"Consultando leads do produto: {produto}")
-                faltantes = get_leads_not_received(token, produto, chave_cliente)
+                faltantes = get_leads_not_received(
+                    token,
+                    produto,
+                    chave_cliente,
+                    data_inicio.isoformat(),
+                    data_final.isoformat(),
+                )
                 if not faltantes.empty:
                     resultados.append(faltantes)
                 progress.progress((i + 1) / len(produtos))
