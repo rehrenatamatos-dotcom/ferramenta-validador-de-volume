@@ -39,9 +39,7 @@ PRODUTOS_PARAM_TEMPLATE = {
     "type": "category",
     "target": ["variable", ["template-tag", "chave_unica"]],
 }
-# TODO: confirmar o nome exato da coluna de produto que aparece na tabela
-# dessa question (ex: "Produto", "Nome do Produto"...).
-COLUNA_PRODUTO = "TROCAR_PELO_NOME_DA_COLUNA_PRODUTO"
+COLUNA_PRODUTO = "Produto"
 
 # Question 39 - "Growth - Relatório de Orçamentos Únicos" (filtro: produto)
 LEADS_CARD_ID = 39
