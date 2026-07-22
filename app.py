@@ -83,7 +83,7 @@ def run_card(session_token: str, card_id: int, parameters: list) -> pd.DataFrame
         json={"parameters": parameters},
         timeout=60,
     )
-    if resp.status_code != 200:
+    if resp.status_code not in (200, 202):
         raise RuntimeError(
             f"Erro ao consultar a question {card_id} no Metabase: "
             f"{resp.status_code} - {resp.text}"
