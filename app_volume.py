@@ -417,9 +417,37 @@ if st.session_state.produtos:
         f"{', '.join(st.session_state.produtos)}"
     )
     if st.session_state.anuncios_candidatos:
+        if "anuncios_bloqueados_ms" not in st.session_state:
+            st.session_state["anuncios_bloqueados_ms"] = []
+
+        busca_anuncio = st.text_input(
+            "Buscar por palavra (ex: TNT) pra marcar vários de uma vez",
+            key="busca_anuncio_bloqueio",
+        )
+        candidatos = st.session_state.anuncios_candidatos
+        filtrados = (
+            [c for c in candidatos if busca_anuncio.strip().lower() in c.lower()]
+            if busca_anuncio.strip()
+            else candidatos
+        )
+
+        col_b1, col_b2, col_b3 = st.columns(3)
+        with col_b1:
+            if st.button(f"Marcar os {len(filtrados)} encontrados", disabled=not filtrados):
+                atual = set(st.session_state["anuncios_bloqueados_ms"])
+                atual.update(filtrados)
+                st.session_state["anuncios_bloqueados_ms"] = sorted(atual)
+        with col_b2:
+            if st.button("Marcar todos"):
+                st.session_state["anuncios_bloqueados_ms"] = sorted(candidatos)
+        with col_b3:
+            if st.button("Limpar seleção"):
+                st.session_state["anuncios_bloqueados_ms"] = []
+
         anuncios_bloqueados_selecionados = st.multiselect(
             "Anúncios de outras empresas que não fazem sentido pra esse cliente",
-            options=st.session_state.anuncios_candidatos,
+            options=candidatos,
+            key="anuncios_bloqueados_ms",
         )
     else:
         st.caption("Nenhum anúncio de outra empresa encontrado nessas categorias.")
