@@ -2,9 +2,10 @@
 Orçamentos perdidos por falta de vínculo — app web (Streamlit)
 
 Cada pessoa do time abre o site, escolhe o cliente que quer auditar, o
-período e a região de atuação dele, e clica em "Gerar relatório". O app
-consulta o Metabase, filtra os leads que aquele cliente não recebeu
-(produto por produto, e anúncio por anúncio) e devolve um Excel pra baixar.
+período e a região de atuação dele, revisa sugestões de anúncios pra
+bloquear, e clica em "Gerar relatório". O app consulta o Metabase, filtra
+os leads que aquele cliente não recebeu (produto por produto, e anúncio
+por anúncio) e devolve um Excel formatado pra baixar.
 
 O login do Metabase NÃO é digitado na tela — fica guardado nos "Secrets"
 do Streamlit Cloud (Settings > Secrets do app), como:
@@ -35,12 +36,16 @@ Regras de negócio aplicadas (definidas em conversa com o time):
    cliente nunca atenderia ali de qualquer forma. A comparação usa a
    coluna "region" (sigla), convertendo a seleção da tela (nomes por
    extenso) pra sigla internamente.
-4. Palavras bloqueadas: campo de texto onde o analista pode digitar
-   palavras (separadas por vírgula) que, se aparecerem no texto da coluna
-   Anúncio, tiram aquele lead da lista de perdidos — para casos em que o
-   cliente está numa categoria de produto mas não trabalha com uma
-   variação específica dela (ex: vende "sacola" mas não sacola reciclável
-   nem de plástico).
+4. Anúncios bloqueados: pra cada produto do cliente, a question 220 traz
+   todos os anúncios de QUALQUER empresa dentro daquela categoria. Os
+   anúncios do próprio cliente já fazem sentido (ele escolheu vender
+   aquilo), então mostramos só os de OUTRAS empresas como sugestão — são
+   os candidatos a "não ter nada a ver" com o cliente (ex: cliente vende
+   "sacola" mas não "sacola reciclável"). O analista marca quais quer
+   bloquear, e a comparação final é por nome exato do anúncio (sem
+   depender de acento ou variação de palavra).
+5. Excel de saída com formatação fixa: todas as linhas com altura 21,
+   cabeçalho em negrito e congelado (freeze panes), nas duas abas.
 """
 import copy
 import io
@@ -48,6 +53,7 @@ import io
 import pandas as pd
 import requests
 import streamlit as st
+from openpyxl.styles import Font
 
 # ============================================================
 # CONFIGURAÇÃO FIXA — preencha isto uma vez só, antes de publicar o app.
@@ -83,6 +89,15 @@ COLUNA_ANUNCIO = "Anúncio"
 COLUNA_EMPRESAS_QUE_RECEBERAM = "Empresas Recebedoras"
 SEPARADOR_EMPRESAS = ","
 COLUNA_UF = "region"  # sigla do estado (ex: "BA", "SP")
+
+# Question 220 - "Anúncios por Produto (busca por ID ou nome)" (filtro: produto)
+ANUNCIOS_CARD_ID = 220
+ANUNCIOS_PARAM_TEMPLATE = {
+    "type": "category",
+    "target": ["variable", ["template-tag", "produto"]],
+}
+COLUNA_NOME_ANUNCIO_220 = "Nome do Anuncio"
+COLUNA_CHAVE_UNICA_220 = "Chave Unica"
 
 # ============================================================
 # Tabela fixa de estados e regiões do Brasil (não vem do Metabase).
@@ -205,6 +220,30 @@ def get_client_products(session_token: str, chave_cliente: str) -> list:
     return sorted(set(produtos_com_ativo.dropna().astype(str).str.strip()))
 
 
+def get_anuncios_candidatos_bloqueio(session_token: str, produtos: list, chave_cliente: str) -> list:
+    """Pra cada produto do cliente, busca na question 220 os anúncios de
+    QUALQUER empresa dentro daquela categoria, e devolve só os nomes de
+    anúncio que pertencem a OUTRAS empresas (não o cliente auditado) —
+    esses são os candidatos a bloquear (regra 4), porque os anúncios do
+    próprio cliente já fazem sentido pra ele."""
+    nomes = set()
+    for produto in produtos:
+        param = copy.deepcopy(ANUNCIOS_PARAM_TEMPLATE)
+        param["value"] = produto
+        df = run_card(session_token, ANUNCIOS_CARD_ID, [param])
+        if df.empty:
+            continue
+        faltando = [c for c in (COLUNA_NOME_ANUNCIO_220, COLUNA_CHAVE_UNICA_220) if c not in df.columns]
+        if faltando:
+            raise RuntimeError(
+                f"Coluna(s) {faltando} não encontrada(s) na question de anúncios por produto. "
+                f"Colunas encontradas: {list(df.columns)}"
+            )
+        de_outras_empresas = df[df[COLUNA_CHAVE_UNICA_220].astype(str).str.strip() != chave_cliente]
+        nomes.update(de_outras_empresas[COLUNA_NOME_ANUNCIO_220].dropna().astype(str).str.strip())
+    return sorted(nomes)
+
+
 def _parametro(tag: str, valor: str) -> dict:
     return {"type": "category", "target": ["variable", ["template-tag", tag]], "value": valor}
 
@@ -240,7 +279,7 @@ def get_leads_not_received(
     data_inicio: str,
     data_final: str,
     ufs_permitidas: set | None,
-    palavras_bloqueadas: list,
+    anuncios_bloqueados: set,
 ) -> pd.DataFrame:
     # Regra 2: duas passadas — por produto e por anúncio — juntando e
     # removendo duplicata pelo Orçamento ID.
@@ -272,13 +311,10 @@ def get_leads_not_received(
     if ufs_permitidas is not None and not faltantes.empty:
         faltantes = faltantes[faltantes[COLUNA_UF].isin(ufs_permitidas)]
 
-    # Regra 4: remove leads cujo Anúncio contenha alguma palavra bloqueada.
-    if palavras_bloqueadas and not faltantes.empty:
-        def tem_palavra_bloqueada(anuncio) -> bool:
-            texto = "" if pd.isna(anuncio) else str(anuncio).lower()
-            return any(p in texto for p in palavras_bloqueadas)
-
-        faltantes = faltantes[~faltantes[COLUNA_ANUNCIO].apply(tem_palavra_bloqueada)]
+    # Regra 4: remove leads cujo Anúncio está na lista de bloqueados
+    # (nome exato, marcado pelo analista a partir das sugestões da question 220).
+    if anuncios_bloqueados and not faltantes.empty:
+        faltantes = faltantes[~faltantes[COLUNA_ANUNCIO].astype(str).str.strip().isin(anuncios_bloqueados)]
 
     if not faltantes.empty:
         faltantes.insert(0, "Produto Consultado", produto)
@@ -296,6 +332,17 @@ def gerar_excel(resultado: pd.DataFrame) -> bytes:
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         resumo.to_excel(writer, sheet_name="Resumo por Produto", index=False)
         resultado.to_excel(writer, sheet_name="Leads Não Recebidos", index=False)
+
+        # Regra 5: formatação fixa nas duas abas — cabeçalho em negrito e
+        # congelado, e todas as linhas com altura 21.
+        for sheet_name in ("Resumo por Produto", "Leads Não Recebidos"):
+            ws = writer.sheets[sheet_name]
+            ws.freeze_panes = "A2"
+            for cell in ws[1]:
+                cell.font = Font(bold=True)
+            for row_idx in range(1, ws.max_row + 1):
+                ws.row_dimensions[row_idx].height = 21
+
     return buffer.getvalue()
 
 
@@ -317,6 +364,11 @@ if "metabase_username" not in st.secrets or "metabase_password" not in st.secret
     )
     st.stop()
 
+if "produtos" not in st.session_state:
+    st.session_state.produtos = None
+if "anuncios_candidatos" not in st.session_state:
+    st.session_state.anuncios_candidatos = None
+
 st.subheader("Cliente a auditar")
 chave_cliente = st.text_input("Chave única (ID) do cliente no Metabase")
 
@@ -335,66 +387,95 @@ regioes_selecionadas = st.multiselect(
     help="Leads fora dessa cobertura não entram na lista de perdidos.",
 )
 
-st.subheader("Palavras bloqueadas (opcional)")
-palavras_texto = st.text_input(
-    "Palavras que, se aparecerem no Anúncio, tiram o lead da lista (separadas por vírgula)",
-    placeholder="ex: reciclável, plástico",
+st.subheader("Anúncios a bloquear")
+st.caption(
+    "Busque os produtos do cliente pra ver sugestões de anúncios de outras empresas "
+    "dentro das mesmas categorias — marque os que não fazem sentido pra esse cliente."
 )
 
-periodo_ok = data_inicio and data_final
+if st.button("Buscar produtos e sugestões de anúncios", disabled=not chave_cliente):
+    try:
+        with st.spinner("Fazendo login no Metabase..."):
+            token = login(st.secrets["metabase_username"], st.secrets["metabase_password"])
+        with st.spinner("Buscando produtos ativos cadastrados do cliente..."):
+            st.session_state.produtos = get_client_products(token, chave_cliente)
+        if not st.session_state.produtos:
+            st.warning("Não encontrei nenhum produto com anúncio ativo para essa chave de cliente.")
+            st.session_state.anuncios_candidatos = []
+        else:
+            with st.spinner("Buscando anúncios candidatos por produto..."):
+                st.session_state.anuncios_candidatos = get_anuncios_candidatos_bloqueio(
+                    token, st.session_state.produtos, chave_cliente
+                )
+    except RuntimeError as e:
+        st.error(str(e))
 
-if st.button("Gerar relatório", type="primary", disabled=not (chave_cliente and periodo_ok)):
+anuncios_bloqueados_selecionados = []
+if st.session_state.produtos:
+    st.write(
+        f"**{len(st.session_state.produtos)} produto(s) com anúncio ativo:** "
+        f"{', '.join(st.session_state.produtos)}"
+    )
+    if st.session_state.anuncios_candidatos:
+        anuncios_bloqueados_selecionados = st.multiselect(
+            "Anúncios de outras empresas que não fazem sentido pra esse cliente",
+            options=st.session_state.anuncios_candidatos,
+        )
+    else:
+        st.caption("Nenhum anúncio de outra empresa encontrado nessas categorias.")
+
+st.divider()
+periodo_ok = data_inicio and data_final
+pronto_para_gerar = bool(chave_cliente and periodo_ok and st.session_state.produtos)
+
+if st.button("Gerar relatório", type="primary", disabled=not pronto_para_gerar):
     try:
         ufs_permitidas = resolver_ufs(regioes_selecionadas)
-        palavras_bloqueadas = [p.strip().lower() for p in palavras_texto.split(",") if p.strip()]
+        anuncios_bloqueados = set(anuncios_bloqueados_selecionados)
 
         with st.spinner("Fazendo login no Metabase..."):
             token = login(st.secrets["metabase_username"], st.secrets["metabase_password"])
 
-        with st.spinner("Buscando produtos ativos cadastrados do cliente..."):
-            produtos = get_client_products(token, chave_cliente)
-
-        if not produtos:
-            st.warning(
-                "Não encontrei nenhum produto com anúncio ativo para essa chave de cliente."
+        produtos = st.session_state.produtos
+        progress = st.progress(0.0)
+        status_area = st.empty()
+        resultados = []
+        for i, produto in enumerate(produtos):
+            status_area.text(f"Consultando leads do produto: {produto}")
+            faltantes = get_leads_not_received(
+                token,
+                produto,
+                chave_cliente,
+                data_inicio.isoformat(),
+                data_final.isoformat(),
+                ufs_permitidas,
+                anuncios_bloqueados,
             )
+            if not faltantes.empty:
+                resultados.append(faltantes)
+            progress.progress((i + 1) / len(produtos))
+
+        status_area.empty()
+        progress.empty()
+
+        if not resultados:
+            st.success("Nenhum orçamento perdido encontrado para os produtos deste cliente. 🎉")
         else:
-            st.write(f"**{len(produtos)} produto(s) com anúncio ativo:** {', '.join(produtos)}")
+            resultado_final = pd.concat(resultados, ignore_index=True)
+            st.success(f"{len(resultado_final)} orçamento(s) não recebido(s) encontrado(s).")
+            st.dataframe(resultado_final, use_container_width=True)
 
-            progress = st.progress(0.0)
-            status_area = st.empty()
-            resultados = []
-            for i, produto in enumerate(produtos):
-                status_area.text(f"Consultando leads do produto: {produto}")
-                faltantes = get_leads_not_received(
-                    token,
-                    produto,
-                    chave_cliente,
-                    data_inicio.isoformat(),
-                    data_final.isoformat(),
-                    ufs_permitidas,
-                    palavras_bloqueadas,
-                )
-                if not faltantes.empty:
-                    resultados.append(faltantes)
-                progress.progress((i + 1) / len(produtos))
-
-            status_area.empty()
-            progress.empty()
-
-            if not resultados:
-                st.success("Nenhum orçamento perdido encontrado para os produtos deste cliente. 🎉")
-            else:
-                resultado_final = pd.concat(resultados, ignore_index=True)
-                st.success(f"{len(resultado_final)} orçamento(s) não recebido(s) encontrado(s).")
-                st.dataframe(resultado_final, use_container_width=True)
-
-                excel_bytes = gerar_excel(resultado_final)
-                st.download_button(
-                    "⬇️ Baixar Excel",
-                    data=excel_bytes,
-                    file_name=f"orcamentos_perdidos_{chave_cliente}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
+            excel_bytes = gerar_excel(resultado_final)
+            st.download_button(
+                "⬇️ Baixar Excel",
+                data=excel_bytes,
+                file_name=f"orcamentos_perdidos_{chave_cliente}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
     except RuntimeError as e:
         st.error(str(e))
+
+if not st.session_state.produtos:
+    st.caption(
+        'Clique em "Buscar produtos e sugestões de anúncios" antes de gerar o relatório.'
+    )
