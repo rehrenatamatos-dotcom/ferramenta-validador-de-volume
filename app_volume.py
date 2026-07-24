@@ -49,11 +49,20 @@ Regras de negócio aplicadas (definidas em conversa com o time):
 """
 import copy
 import io
+import unicodedata
 
 import pandas as pd
 import requests
 import streamlit as st
 from openpyxl.styles import Font
+
+
+def normalizar_texto(texto: str) -> str:
+    """Deixa minúsculo e remove acentos, pra "plastico" achar "plástico"
+    (e qualquer outra variação de acentuação) na busca de anúncios."""
+    sem_acento = unicodedata.normalize("NFKD", texto)
+    sem_acento = "".join(c for c in sem_acento if not unicodedata.combining(c))
+    return sem_acento.lower()
 
 # ============================================================
 # CONFIGURAÇÃO FIXA — preencha isto uma vez só, antes de publicar o app.
@@ -425,8 +434,9 @@ if st.session_state.produtos:
             key="busca_anuncio_bloqueio",
         )
         candidatos = st.session_state.anuncios_candidatos
+        busca_normalizada = normalizar_texto(busca_anuncio.strip())
         filtrados = (
-            [c for c in candidatos if busca_anuncio.strip().lower() in c.lower()]
+            [c for c in candidatos if busca_normalizada in normalizar_texto(c)]
             if busca_anuncio.strip()
             else candidatos
         )
